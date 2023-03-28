@@ -25,6 +25,7 @@ from vizier.pyvizier.converters.core import ModelInputConverter
 from vizier.pyvizier.converters.core import ModelOutputConverter
 from vizier.pyvizier.converters.core import NumpyArraySpec
 from vizier.pyvizier.converters.core import NumpyArraySpecType
+from vizier.pyvizier.converters.core import PaddedTrialToArrayConverter
 from vizier.pyvizier.converters.core import STUDY_ID_FIELD
 from vizier.pyvizier.converters.core import TrialToArrayConverter
 from vizier.pyvizier.converters.core import TrialToNumpyDict

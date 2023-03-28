@@ -22,6 +22,7 @@ from vizier import pyvizier
 from vizier._src.algorithms.designers import random
 from vizier._src.algorithms.testing import test_runners
 from vizier.pyvizier.converters import core
+from vizier.pyvizier.converters import padding
 from vizier.testing import test_studies
 
 from absl.testing import absltest
@@ -31,7 +32,7 @@ from absl.testing import parameterized
 Trial = pyvizier.Trial
 
 
-class TrialToArrayConverterTest(absltest.TestCase):
+class TrialToArrayConverterTest(parameterized.TestCase):
   """Test TrialToArrayConverter class."""
 
   def setUp(self):
@@ -146,6 +147,103 @@ class TrialToArrayConverterTest(absltest.TestCase):
     self.assertEqual(converter.metric_specs[0].name, 'obj1')
     self.assertEqual(converter.metric_specs[1].name, 'obj2')
     self.assertEqual(converter.metric_specs[2].name, 'obj3')
+
+  @parameterized.parameters([
+      dict(
+          num_continuous=6,
+          num_integer=1,
+          categorical_size=5,
+          num_trials=7,
+          padding_schedule=padding.PaddingSchedule(
+              num_features=padding.PaddingType.MULTIPLES_OF_10,
+              num_dimensions=padding.PaddingType.POWERS_OF_2,
+          ),
+          expected_num_trials=10,
+          expected_dimension=16,
+      ),
+      dict(
+          num_continuous=2,
+          num_integer=4,
+          categorical_size=3,
+          num_trials=7,
+          padding_schedule=padding.PaddingSchedule(
+              num_features=padding.PaddingType.POWERS_OF_2,
+              num_dimensions=padding.PaddingType.MULTIPLES_OF_10,
+          ),
+          expected_num_trials=8,
+          expected_dimension=10,
+      ),
+  ])
+  def test_padding(
+      self,
+      num_continuous,
+      num_integer,
+      categorical_size,
+      num_trials,
+      padding_schedule,
+      expected_num_trials,
+      expected_dimension,
+  ):
+    space = pyvizier.SearchSpace()
+    root = space.root
+    for i in range(num_continuous):
+      root.add_float_param(f'double_{i}', 0.0, 100.0)
+
+    for i in range(num_integer):
+      root.add_int_param(f'integer_{i}', 0, 100)
+    root.add_categorical_param(
+        'categorical', [str(k) for k in range(categorical_size)]
+    )
+
+    converter = core.PaddedTrialToArrayConverter.from_study_config(
+        pyvizier.ProblemStatement(
+            search_space=space,
+            metric_information=[
+                pyvizier.MetricInformation(
+                    'x1', goal=pyvizier.ObjectiveMetricGoal.MAXIMIZE
+                )
+            ],
+        ),
+        padding_schedule=padding_schedule,
+    )
+    trials = []
+    for i in range(num_trials):
+      parameters = {}
+      for j in range(num_continuous):
+        parameters[f'double_{j}'] = 1.0 * j
+
+      for j in range(num_integer):
+        parameters[f'integer_{j}'] = j
+
+      parameters['categorical'] = str(i % categorical_size)
+      final_measurement = pyvizier.Measurement(steps=1, metrics={'y': 3 * i})
+      trials.append(
+          pyvizier.Trial(
+              parameters=parameters, final_measurement=final_measurement
+          )
+      )
+
+    features = converter.to_features(trials).padded_array
+
+    self.assertSequenceEqual(
+        features.shape, [expected_num_trials, expected_dimension]
+    )
+
+    labels = converter.to_labels(trials).padded_array
+    self.assertSequenceEqual(labels.shape, [expected_num_trials, 1])
+
+    features, labels = converter.to_xy(trials)
+    features = features.padded_array
+    labels = labels.padded_array
+    self.assertSequenceEqual(
+        features.shape, [expected_num_trials, expected_dimension]
+    )
+    self.assertSequenceEqual(labels.shape, [expected_num_trials, 1])
+
+    recovered_parameters = converter.to_parameters(features)
+    self.assertSequenceEqual(
+        recovered_parameters[:num_trials], [t.parameters for t in trials]
+    )
 
 
 class DictToArrayTest(absltest.TestCase):

@@ -193,6 +193,7 @@ class OptaxTrainWithRandomRestarts(Optimizer[_Params]):
 
     logging.info('Initialized parameters. %s',
                  jax.tree_map(lambda x: x.shape, params))
+    logging.info('Loss and Grads for start. %s', jax.vmap(grad_fn)(params))
 
     # See https://jax.readthedocs.io/en/latest/faq.html#buffer-donation.
     train_step = jax.jit(train_step, donate_argnums=[0, 1])
