@@ -95,11 +95,15 @@ class EfficiencyComparisonTester:
               baseline_statement.metric_information.item()).convert(
                   candidate_state.algorithm.supporter.GetTrials()))
 
-    baseline_curve = benchmarks.ConvergenceCurve.align_xs(
-        baseline_curves, interpolate_repeats=True)
-    candidate_curve = benchmarks.ConvergenceCurve.align_xs(
-        candidate_curves, interpolate_repeats=True)
-    comparator = benchmarks.ConvergenceCurveComparator(baseline_curve)
+    baseline_curve = benchmarks.ConvergenceCurve.align_xs_combine_ys(
+        baseline_curves, ignore_repeats=True
+    )
+    candidate_curve = benchmarks.ConvergenceCurve.align_xs_combine_ys(
+        candidate_curves, ignore_repeats=True
+    )
+    comparator = benchmarks.LogEfficiencyConvergenceCurveComparator(
+        baseline_curve
+    )
 
     if (log_eff_score :=
         comparator.get_log_efficiency_score(candidate_curve)) < score_threshold:

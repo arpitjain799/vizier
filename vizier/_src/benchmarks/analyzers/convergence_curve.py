@@ -17,6 +17,7 @@ from __future__ import annotations
 """Converters and comparators for convergence curves."""
 
 import enum
+import logging
 from typing import Callable, List, Optional, Sequence, Union
 
 import attr
@@ -65,11 +66,13 @@ class ConvergenceCurve:
     return self.ys.shape[0]
 
   @classmethod
-  def align_xs(cls,
-               curves: Sequence['ConvergenceCurve'],
-               *,
-               resolution: Optional[int] = None,
-               interpolate_repeats=False) -> 'ConvergenceCurve':
+  def _align_xs(
+      cls,
+      curves: Sequence['ConvergenceCurve'],
+      *,
+      resolution: Optional[int] = None,
+      ignore_repeats: bool = False,
+  ) -> tuple[np.ndarray, list[np.ndarray]]:
     """Align curves to the same xs using linear interpolation.
 
     If xs are greater than xp[-1], then default is np.nan.
@@ -78,12 +81,11 @@ class ConvergenceCurve:
       curves:
       resolution: Number of points to interpolate to. Leave it None to use the
         maximal resolution.
-      interpolate_repeats: Interpolate repeated values in the curve via
-      linear interpolation (except for the last repeated segment).
+      ignore_repeats: Ignore repeated values in the curve during linear
+        interpolation (except for the last repeated segment).
 
     Returns:
-      ConvergenceCurve whose batch size is equal to the sum of the batch size
-      of `curves`.
+      The xs and all the interpolated ys.
     """
     if not curves:
       raise ValueError('Empty sequence of curves.')
@@ -96,8 +98,9 @@ class ConvergenceCurve:
 
     all_ys = []
     for curve in curves:
+      curve_ys = []
       for ys in curve.ys:
-        if interpolate_repeats:
+        if ignore_repeats:
           _, indices = np.unique(ys, return_index=True)
           # Sorting indices from increasing order due to sign differences.
           indices = sorted(indices)
@@ -106,25 +109,61 @@ class ConvergenceCurve:
         else:
           # Use the whole curve.
           indices = range(len(ys))
-
-        all_ys.append(
+        curve_ys.append(
             np.interp(
                 xs,
                 np.array([curve.xs[i] for i in indices]),
                 np.array([ys[i] for i in indices]),
-                right=np.nan))
+                right=np.nan,
+            )
+        )
+      all_ys.append(np.stack(curve_ys, axis=0))
+    return xs, all_ys
 
+  @classmethod
+  def align_xs_combine_ys(
+      cls,
+      curves: Sequence['ConvergenceCurve'],
+      *,
+      resolution: Optional[int] = None,
+      ignore_repeats: bool = False,
+  ) -> 'ConvergenceCurve':
+    """Align curves (same xs) using linear interpolation and combine all ys."""
+    xs, all_ys = cls._align_xs(
+        curves, resolution=resolution, ignore_repeats=ignore_repeats
+    )
     # Take all non-empty ylabels.
     ylabels = list(set([c.ylabel for c in curves if c.ylabel]))
     if not ylabels:
       ylabel = ''
     elif len(ylabels) > 1:
-      print('Curves have different ylabels: %s.', ylabels)
+      logging.info(
+          'Curves have different ylabels: %s. None of them is selected.',
+          ylabels,
+      )
       ylabel = ''
     else:
       ylabel = ylabels[0]
+    return cls(
+        xs=xs, ys=np.vstack(all_ys), ylabel=ylabel, trend=curves[0].trend
+    )
 
-    return cls(xs=xs, ys=np.stack(all_ys), ylabel=ylabel, trend=curves[0].trend)
+  @classmethod
+  def align_xs_keep_ys(
+      cls,
+      curves: Sequence['ConvergenceCurve'],
+      *,
+      resolution: Optional[int] = None,
+      ignore_repeats: bool = False,
+  ) -> list['ConvergenceCurve']:
+    """Align curves (same xs) using linear interpolation and keep ys."""
+    xs, all_ys = cls._align_xs(
+        curves, resolution=resolution, ignore_repeats=ignore_repeats
+    )
+    return [
+        cls(xs=xs, ys=ys, ylabel=curves[i].ylabel, trend=curves[0].trend)
+        for i, ys in enumerate(all_ys)
+    ]
 
   @classmethod
   def extrapolate_ys(cls,
@@ -192,7 +231,7 @@ class ConvergenceCurveConverter:
     """Returns ConvergenceCurve of batch size 1."""
     yvals = [np.nan]
     xvals = [0]
-    comparator = self.comparator
+
     for trial in trials:
       candidates = [np.nan]
       if self.measurements_type in ('final', 'all'):
@@ -206,9 +245,9 @@ class ConvergenceCurveConverter:
             candidates.append(
                 measurement.metrics[self.metric_information.name].value)
 
-      yvalue = comparator(candidates)
+      yvalue = self.comparator(candidates)
       xvals.append(xvals[-1] + self.cost_fn(trial))
-      yvals.append(comparator([yvalue, yvals[-1]]))
+      yvals.append(self.comparator([yvalue, yvals[-1]]))
 
     yvals = np.asarray(yvals[1:])
     trend = ConvergenceCurve.YTrend.DECREASING
@@ -290,8 +329,8 @@ class HypervolumeCurveConverter:
     )
 
 
-class ConvergenceCurveComparator:
-  """Comparator methods for ConvergenceCurves.
+class LogEfficiencyConvergenceCurveComparator:
+  """Comparator methods for ConvergenceCurves based on log efficiency.
 
   Methods in this class generally return comparison metrics for a compared curve
   against a baseline curve. Only works for curves with INCREASING or DECREASING
@@ -397,15 +436,21 @@ class ConvergenceCurveComparator:
       Sample efficiency score. This score is symmetric and always finite when
       baseline_quantile <= compare_quantile (recommended setting).
     """
-    baseline_curve = ConvergenceCurve.align_xs([self._baseline_curve],
-                                               interpolate_repeats=True)
-    compared_curve = ConvergenceCurve.align_xs([compared_curve],
-                                               interpolate_repeats=True)
+    baseline_curve = ConvergenceCurve.align_xs_combine_ys(
+        [self._baseline_curve], ignore_repeats=True
+    )
+    compared_curve = ConvergenceCurve.align_xs_combine_ys(
+        [compared_curve], ignore_repeats=True
+    )
     # Combined curve (as the baseline) becomes the y-values at which
     # Trial efficiency is evaluated.
-    combined_curve = ConvergenceCurve.align_xs([baseline_curve, compared_curve])
+    combined_curve = ConvergenceCurve.align_xs_combine_ys(
+        [baseline_curve, compared_curve]
+    )
     combined_curve.ys = np.nanmedian(combined_curve.ys, axis=0, keepdims=True)
-    comparator = ConvergenceCurveComparator(baseline_curve=combined_curve)
+    comparator = LogEfficiencyConvergenceCurveComparator(
+        baseline_curve=combined_curve
+    )
 
     # Look ahead for exp(max_score)*T steps, as score is in the log space.
     extend_steps = int(np.exp(max_score) * len(self._baseline_curve.xs))
@@ -424,6 +469,84 @@ class ConvergenceCurveComparator:
         efficiency_compared.ys, a_min=-max_score, a_max=max_score) - np.clip(
             efficiency_baseline.ys, a_min=-max_score, a_max=max_score)
     return np.median(diff[int(len(diff) / 2):])
+
+
+class PercentageBetterConvergenceCurveComparator:
+  """Comparator methods for ConvergenceCurves based on percentage better."""
+
+  def get_percentage_better_score(
+      self,
+      baseline_curve: ConvergenceCurve,
+      compared_curve: ConvergenceCurve,
+      burn_cutoff: Optional[float] = None,
+      baseline_quanitle: float = 0.5,
+      compared_quanitle: float = 0.5,
+  ) -> float:
+    """Computes the percentage better score.
+
+    The score is the percentage of indices (after the burn cutoff) for which the
+    extrapolated values of 'compared_curve' are better than the extrapolated
+    values of 'baseline_curve'. A large score value means 'compared' is better.
+
+    Args:
+      baseline_curve: The baseline ConvergenceCurve.
+      compared_curve: The compared ConvergenceCurve.
+      burn_cutoff: The cutoff below which values not included in score.
+      baseline_quanitle: The baseline batch quantile.
+      compared_quanitle: The compared batch quanitle.
+
+    Returns:
+      The percentage better convergence score [0.0, 1.0].
+
+    Raises:
+      ValueError: If curve trends are not INCREASING or DECREASING, or not
+      equal.
+    """
+    if baseline_curve.trend != compared_curve.trend:
+      raise ValueError(
+          f'Baseline curve trend {baseline_curve.trend}'
+          f' must match compared curve trend {compared_curve.trend}'
+      )
+    if baseline_curve.trend not in (
+        ConvergenceCurve.YTrend.INCREASING,
+        ConvergenceCurve.YTrend.DECREASING,
+    ):
+      raise ValueError(
+          f'Curve trend {baseline_curve.trend} must be either'
+          'increasing or decreasing.'
+      )
+    sign = (
+        1.0
+        if (baseline_curve.trend == ConvergenceCurve.YTrend.INCREASING)
+        else -1.0
+    )
+    # Align the curves while keeping each ys.
+    align_baseline_curve, align_compared_curve = (
+        ConvergenceCurve.align_xs_keep_ys(
+            [baseline_curve, compared_curve], ignore_repeats=False
+        )
+    )
+    # Apply batch quantiels.
+    baseline_ys = np.nanquantile(
+        sign * align_baseline_curve.ys, baseline_quanitle, axis=0
+    )
+    compared_ys = np.nanquantile(
+        sign * align_compared_curve.ys, compared_quanitle, axis=0
+    )
+    # Impute NaN values as -inf.
+    baseline_ys = np.nan_to_num(baseline_ys, nan=-np.inf)
+    compared_ys = np.nan_to_num(compared_ys, nan=-np.inf)
+    # Remove burn cutoff values.
+    if burn_cutoff is not None:
+      baseline_cutoff_ind = np.where(align_baseline_curve.xs >= burn_cutoff)[0]
+      compared_cutoff_ind = np.where(align_compared_curve.xs >= burn_cutoff)[0]
+      if np.size(baseline_cutoff_ind) == 0 or np.size(compared_cutoff_ind) == 0:
+        raise ValueError('The given burn_cutoff value is too high.')
+      else:
+        baseline_ys = baseline_ys[baseline_cutoff_ind[0] :]
+        compared_ys = compared_ys[compared_cutoff_ind[0] :]
+    # Compute percentage better score.
+    return np.mean(baseline_ys < compared_ys)
 
 
 def build_convergence_curve(baseline_curve: Sequence[float],
